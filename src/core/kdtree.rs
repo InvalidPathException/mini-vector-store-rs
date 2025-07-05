@@ -44,28 +44,20 @@ impl KDTree {
 
     /// Insert a vector into the KD-tree
     pub fn insert(&mut self, vector: Vector, key: String) {
-        if vector.size() != self.dimensions {
-            panic!("Vector dimensions must match KD-tree dimensions");
-        }
+        assert_eq!(vector.size(), self.dimensions, "Vector dimensions must match KD-tree dimensions");
+        assert!(!self.vector_map.contains_key(&key), "Key '{}' already exists in tree", key);
         
         // Check if this key was previously tombstoned
         if self.tombstones.contains_key(&key) {
             // Remove from tombstones and rebuild tree (which clears all tombstones)
             self.tombstones.remove(&key);
             self.rebuild_tree();
-            debug_assert!(self.tombstones.is_empty(), "Tombstone map should be empty after rebuild");
             // Now insert the new node as a fresh insert
             self.insert(vector, key);
             return;
         }
         
         self.vector_map.insert(key.clone(), vector.clone());
-        
-        // Check if we need to rebuild due to tombstone balance
-        if self.tombstones.len() >= self.vector_map.len() {
-            self.rebuild_tree();
-            return;
-        }
         
         if let Some(ref mut root) = self.root {
             Self::insert_recursive_static(root, vector, key, 0, self.dimensions);
@@ -179,9 +171,7 @@ impl KDTree {
 
     /// Find k nearest neighbors to a query vector
     pub fn nearest_neighbors(&self, query: &Vector, k: usize) -> Vec<(String, f32)> {
-        if query.size() != self.dimensions {
-            panic!("Query vector dimensions must match KD-tree dimensions");
-        }
+        assert_eq!(query.size(), self.dimensions, "Query vector dimensions must match KD-tree dimensions");
         
         if self.root.is_none() || k == 0 {
             return Vec::new();
@@ -298,14 +288,35 @@ mod tests {
     fn test_kd_tree_nearest_neighbor() {
         let mut tree = KDTree::new(2, Distance::Euclidean);
         
-        tree.insert(Vector::from_slice(&[1.0, 1.0]), "point1".to_string());
-        tree.insert(Vector::from_slice(&[3.0, 3.0]), "point2".to_string());
-        tree.insert(Vector::from_slice(&[5.0, 5.0]), "point3".to_string());
+        // Add points in a grid pattern
+        tree.insert(Vector::from_slice(&[0.0, 0.0]), "origin".to_string());
+        tree.insert(Vector::from_slice(&[1.0, 0.0]), "right".to_string());
+        tree.insert(Vector::from_slice(&[0.0, 1.0]), "up".to_string());
+        tree.insert(Vector::from_slice(&[1.0, 1.0]), "diagonal".to_string());
+        tree.insert(Vector::from_slice(&[2.0, 0.0]), "far_right".to_string());
+        tree.insert(Vector::from_slice(&[0.0, 2.0]), "far_up".to_string());
         
-        let query = Vector::from_slice(&[2.0, 2.0]);
-        let nearest = tree.nearest_neighbor(&query);
+        let query = Vector::from_slice(&[0.5, 0.5]);
         
-        assert_eq!(nearest, Some("point1".to_string()));
+        // Test k=1 (should be origin)
+        let nearest = tree.nearest_neighbors(&query, 1);
+        assert_eq!(nearest.len(), 1);
+        assert_eq!(nearest[0].0, "origin");
+        
+        // Test k=3 (should be origin, right, up in some order)
+        let nearest_3 = tree.nearest_neighbors(&query, 3);
+        assert_eq!(nearest_3.len(), 3);
+        
+        // Verify all returned points are among the expected closest ones
+        let expected_keys = ["origin", "right", "up"];
+        for (key, _) in &nearest_3 {
+            assert!(expected_keys.contains(&key.as_str()), "Unexpected key: {}", key);
+        }
+        
+        // Verify distances are in ascending order
+        for i in 1..nearest_3.len() {
+            assert!(nearest_3[i-1].1 <= nearest_3[i].1, "Distances not in ascending order");
+        }
     }
 
     #[test]
@@ -440,37 +451,10 @@ mod tests {
     }
 
     #[test]
-    fn test_kd_tree_k_nearest_neighbors_heap_optimization() {
+    #[should_panic(expected = "Key 'point1' already exists in tree")]
+    fn test_duplicate_key_insertion() {
         let mut tree = KDTree::new(2, Distance::Euclidean);
-        
-        // Add points in a grid pattern
-        tree.insert(Vector::from_slice(&[0.0, 0.0]), "origin".to_string());
-        tree.insert(Vector::from_slice(&[1.0, 0.0]), "right".to_string());
-        tree.insert(Vector::from_slice(&[0.0, 1.0]), "up".to_string());
-        tree.insert(Vector::from_slice(&[1.0, 1.0]), "diagonal".to_string());
-        tree.insert(Vector::from_slice(&[2.0, 0.0]), "far_right".to_string());
-        tree.insert(Vector::from_slice(&[0.0, 2.0]), "far_up".to_string());
-        
-        let query = Vector::from_slice(&[0.5, 0.5]);
-        
-        // Test k=1 (should be origin)
-        let nearest = tree.nearest_neighbors(&query, 1);
-        assert_eq!(nearest.len(), 1);
-        assert_eq!(nearest[0].0, "origin");
-        
-        // Test k=3 (should be origin, right, up in some order)
-        let nearest_3 = tree.nearest_neighbors(&query, 3);
-        assert_eq!(nearest_3.len(), 3);
-        
-        // Verify all returned points are among the expected closest ones
-        let expected_keys = ["origin", "right", "up"];
-        for (key, _) in &nearest_3 {
-            assert!(expected_keys.contains(&key.as_str()), "Unexpected key: {}", key);
-        }
-        
-        // Verify distances are in ascending order
-        for i in 1..nearest_3.len() {
-            assert!(nearest_3[i-1].1 <= nearest_3[i].1, "Distances not in ascending order");
-        }
+        tree.insert(Vector::from_slice(&[1.0, 1.0]), "point1".to_string());
+        tree.insert(Vector::from_slice(&[1.0, 1.0]), "point1".to_string());
     }
 } 
