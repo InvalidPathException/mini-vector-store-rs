@@ -4,8 +4,7 @@ use crate::core::vector::Vector;
 pub enum Distance {
     Euclidean,
     Manhattan,
-    Cosine,
-    Chebyshev,
+    CosineSim,
 }
 
 impl Distance {
@@ -29,7 +28,7 @@ impl Distance {
                     .map(|(a, b)| (a - b).abs())
                     .sum()
             }
-            Distance::Cosine => {
+            Distance::CosineSim => {
                 let dot = v1.dot_product(v2);
                 let norm1 = v1.norm();
                 let norm2 = v2.norm();
@@ -41,13 +40,6 @@ impl Distance {
                 let cosine_similarity = (dot / (norm1 * norm2)).clamp(-1.0, 1.0);
                 1.0 - cosine_similarity
             }
-            Distance::Chebyshev => {
-                v1.data()
-                    .iter()
-                    .zip(v2.data())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0.0, f32::max)
-            }
         }
     }
 
@@ -56,8 +48,7 @@ impl Distance {
         match self {
             Distance::Euclidean => "euclidean",
             Distance::Manhattan => "manhattan",
-            Distance::Cosine    => "cosine",
-            Distance::Chebyshev => "chebyshev",
+            Distance::CosineSim => "cosinesim",
         }
     }
 
@@ -66,8 +57,7 @@ impl Distance {
         match name.to_lowercase().as_str() {
             "euclidean" | "e" => Some(Distance::Euclidean),
             "manhattan" | "m" => Some(Distance::Manhattan),
-            "cosine"    | "c" => Some(Distance::Cosine),
-            "chebyshev" | "t" => Some(Distance::Chebyshev),
+            "cosinesim" | "c" => Some(Distance::CosineSim),
             _ => None,
         }
     }
@@ -110,7 +100,7 @@ mod tests {
 
     #[test]
     fn test_cosine_similarity() {
-        let d = Distance::Cosine;
+        let d = Distance::CosineSim;
         let v1 = Vector::from_slice(&[1.0, 0.0]);
         let v2 = Vector::from_slice(&[1.0, 0.0]);
         // Same vectors should have distance 0 (similarity 1)
@@ -125,13 +115,7 @@ mod tests {
         assert!((d.distance(&v1, &v4) - 1.0).abs() < 1e-6);
     }
 
-    #[test]
-    fn test_chebyshev() {
-        let v1 = Vector::from_slice(&[1.0, 5.0]);
-        let v2 = Vector::from_slice(&[4.0, 1.0]);
-        let d = Distance::Chebyshev;
-        assert_eq!(d.distance(&v1, &v2), 4.0);
-    }
+
 
     #[test]
     #[should_panic(expected = "Vectors must have the same size")]

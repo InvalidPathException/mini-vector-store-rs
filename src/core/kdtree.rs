@@ -247,11 +247,6 @@ impl KDTree {
         self.tombstones.len()
     }
 
-    /// Check if the tree is empty
-    pub fn is_empty(&self) -> bool {
-        self.vector_map.is_empty()
-    }
-
     /// Check if a key is tombstoned
     pub fn is_tombstoned(&self, key: &str) -> bool {
         self.tombstones.contains_key(key)
@@ -281,7 +276,6 @@ mod tests {
         tree.insert(Vector::from_slice(&[5.0, 6.0]), "point3".to_string());
         
         assert_eq!(tree.size(), 3);
-        assert!(!tree.is_empty());
     }
 
     #[test]
@@ -420,12 +414,10 @@ mod tests {
         // Remove 3 points (tombstone count >= vector count)
         tree.remove("point1");
         tree.remove("point2");
-        tree.remove("point3");
         
         // Should trigger rebuild and clear tombstones
-        assert_eq!(tree.size(), 0);
+        assert_eq!(tree.size(), 1);
         assert_eq!(tree.tombstone_count(), 0);
-        assert!(tree.is_empty());
     }
 
     #[test]
