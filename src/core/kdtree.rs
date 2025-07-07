@@ -242,6 +242,16 @@ impl KDTree {
         self.vector_map.len()
     }
 
+    /// Get all vectors in the tree 
+    pub fn get_all_vectors(&self) -> &HashMap<String, Vector> {
+        &self.vector_map
+    }
+
+    /// Get the distance metric used by this KD-tree
+    pub fn distance_metric(&self) -> Distance {
+        self.distance_metric
+    }
+
     /// Get the number of tombstoned vectors
     pub fn tombstone_count(&self) -> usize {
         self.tombstones.len()

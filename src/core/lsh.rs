@@ -257,6 +257,16 @@ impl LSHIndex {
     pub fn size(&self) -> usize {
         self.vector_map.len()
     }
+
+    /// Get all vectors in the index
+    pub fn get_all_vectors(&self) -> &HashMap<String, Vector> {
+        &self.vector_map
+    }
+
+    /// Get the distance metric used by this LSH index
+    pub fn distance_metric(&self) -> Distance {
+        self.distance_metric
+    }
 }
 
 #[cfg(test)]
