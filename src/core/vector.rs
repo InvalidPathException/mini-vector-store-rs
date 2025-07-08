@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
 use std::hash::{Hash, Hasher};
+use crate::error::VectorError;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Vector {
@@ -43,14 +44,16 @@ impl Vector {
     }
 
     /// Compute the dot product of two vectors
-    pub fn dot_product(&self, other: &Vector) -> f32 {
-        assert_eq!(self.size(), other.size(), "Vectors must have the same size for dot product");
+    pub fn dot_product(&self, other: &Vector) -> Result<f32, VectorError> {
+        if self.size() != other.size() {
+            return Err(VectorError::DimensionsMismatch { expected: self.size(), found: other.size() });
+        }
 
-        self.data
+        Ok(self.data
             .iter()
             .zip(other.data.iter())
             .map(|(a, b)| a * b)
-            .sum()
+            .sum())
     }
 
     /// Compute the L2 norm (magnitude) of the vector
@@ -76,29 +79,33 @@ impl Vector {
     }
 
     /// Returns a new vector equal to self + other
-    pub fn add(&self, other: &Vector) -> Vector {
-        assert_eq!(self.size(), other.size(), "Vectors must have the same size for addition");
+    pub fn add(&self, other: &Vector) -> Result<Vector, VectorError> {
+        if self.size() != other.size() {
+            return Err(VectorError::DimensionsMismatch { expected: self.size(), found: other.size() });
+        }
 
-        Vector {
+        Ok(Vector {
             data: self.data
                 .iter()
                 .zip(other.data.iter())
                 .map(|(a, b)| a + b)
                 .collect(),
-        }
+        })
     }
 
     /// Returns a new vector equal to self - other
-    pub fn subtract(&self, other: &Vector) -> Vector {
-        assert_eq!(self.size(), other.size(), "Vectors must have the same size for subtraction");
+    pub fn subtract(&self, other: &Vector) -> Result<Vector, VectorError> {
+        if self.size() != other.size() {
+            return Err(VectorError::DimensionsMismatch { expected: self.size(), found: other.size() });
+        }
 
-        Vector {
+        Ok(Vector {
             data: self.data
                 .iter()
                 .zip(other.data.iter())
                 .map(|(a, b)| a - b)
                 .collect(),
-        }
+        })
     }
 
     /// Returns a new vector equals to this vector multiplied by a scalar
@@ -141,7 +148,7 @@ impl std::fmt::Display for Vector {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "{:.4}", x)?;
+            write!(f, "{x:.4}")?;
         }
         write!(f, "]")
     }
@@ -152,14 +159,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_vector_creation() {
+    fn test_vector_creation_and_initialization() {
         let v = Vector::new(3);
         assert_eq!(v.size(), 3);
         assert_eq!(v.data(), &[0.0, 0.0, 0.0]);
     }
 
     #[test]
-    fn test_vector_from_slice() {
+    fn test_vector_creation_from_slice() {
         let data = [1.0, 2.0, 3.0];
         let v = Vector::from_slice(&data);
         assert_eq!(v.size(), 3);
@@ -167,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vector_indexing() {
+    fn test_vector_indexing_and_mutation() {
         let mut v = Vector::from_slice(&[1.0, 2.0, 3.0]);
         assert_eq!(v[0], 1.0);
         assert_eq!(v[1], 2.0);
@@ -178,45 +185,51 @@ mod tests {
     }
 
     #[test]
-    fn test_dot_product() {
-        let v1 = Vector::from_slice(&[1.0, 2.0, 3.0]);
-        let v2 = Vector::from_slice(&[4.0, 5.0, 6.0]);
-        assert_eq!(v1.dot_product(&v2), 32.0);
-    }
-
-    #[test]
-    fn test_norm() {
-        let v = Vector::from_slice(&[3.0, 4.0]);
-        assert_eq!(v.norm(), 5.0);
-    }
-
-    #[test]
-    fn test_normalize() {
-        let mut v = Vector::from_slice(&[3.0, 4.0]);
-        v.normalize();
-        assert!((v.norm() - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
     fn test_vector_operations() {
         let v1 = Vector::from_slice(&[1.0, 2.0, 3.0]);
         let v2 = Vector::from_slice(&[4.0, 5.0, 6.0]);
 
-        let sum = v1.add(&v2);
+        let dot_result = v1.dot_product(&v2).unwrap();
+        assert_eq!(dot_result, 32.0); // 1*4 + 2*5 + 3*6 = 4 + 10 + 18 = 32
+
+        let sum = v1.add(&v2).unwrap();
         assert_eq!(sum.data(), &[5.0, 7.0, 9.0]);
 
-        let diff = v1.subtract(&v2);
+        let diff = v1.subtract(&v2).unwrap();
         assert_eq!(diff.data(), &[-3.0, -3.0, -3.0]);
 
         let scaled = v1.scale(2.0);
         assert_eq!(scaled.data(), &[2.0, 4.0, 6.0]);
+        
+        let v3 = Vector::from_slice(&[3.0, 4.0]); // 3-4-5 triangle
+        assert_eq!(v3.norm(), 5.0);
+        
+        let mut v4 = Vector::from_slice(&[3.0, 4.0]);
+        v4.normalize();
+        assert!((v4.norm() - 1.0).abs() < 1e-6);
+        assert!((v4[0] - 0.6).abs() < 1e-6); // 3/5 = 0.6
+        assert!((v4[1] - 0.8).abs() < 1e-6); // 4/5 = 0.8
+        
+        let v5 = Vector::from_slice(&[6.0, 8.0]);
+        let normalized = v5.normalized();
+        assert!((normalized.norm() - 1.0).abs() < 1e-6);
+        assert_eq!(v5.data(), &[6.0, 8.0]); // Original unchanged
+        assert!((normalized[0] - 0.6).abs() < 1e-6); // 6/10 = 0.6
+        assert!((normalized[1] - 0.8).abs() < 1e-6); // 8/10 = 0.8
     }
 
     #[test]
-    #[should_panic(expected = "Vectors must have the same size for dot product")]
-    fn test_dot_product_size_mismatch() {
+    fn test_vector_dimension_mismatch_errors() {
         let v1 = Vector::from_slice(&[1.0, 2.0]);
         let v2 = Vector::from_slice(&[1.0, 2.0, 3.0]);
-        v1.dot_product(&v2);
+        
+        let result = v1.dot_product(&v2);
+        assert!(result.is_err());
+        
+        let result = v1.add(&v2);
+        assert!(result.is_err());
+        
+        let result = v1.subtract(&v2);
+        assert!(result.is_err());
     }
 }

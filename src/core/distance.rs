@@ -1,4 +1,5 @@
 use crate::core::vector::Vector;
+use crate::error::VectorError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Distance {
@@ -9,36 +10,38 @@ pub enum Distance {
 
 impl Distance {
     /// Calculate the distance between two vectors using this metric
-    pub fn distance(&self, v1: &Vector, v2: &Vector) -> f32 {
-        assert_eq!(v1.size(), v2.size(), "Vectors must have the same size");
+    pub fn distance(&self, v1: &Vector, v2: &Vector) -> Result<f32, VectorError> {
+        if v1.size() != v2.size() {
+            return Err(VectorError::DimensionsMismatch { expected: v1.size(), found: v2.size() });
+        }
         
         match self {
             Distance::Euclidean => {
-                v1.data()
+                Ok(v1.data()
                     .iter()
                     .zip(v2.data())
                     .map(|(a, b)| (a - b).powi(2))
                     .sum::<f32>()
-                    .sqrt()
+                    .sqrt())
             }
             Distance::Manhattan => {
-                v1.data()
+                Ok(v1.data()
                     .iter()
                     .zip(v2.data())
                     .map(|(a, b)| (a - b).abs())
-                    .sum()
+                    .sum())
             }
             Distance::CosineSim => {
-                let dot = v1.dot_product(v2);
+                let dot = v1.dot_product(v2)?;
                 let norm1 = v1.norm();
                 let norm2 = v2.norm();
 
                 if norm1 == 0.0 || norm2 == 0.0 {
-                    return 1.0;
+                    return Ok(1.0);
                 }
 
                 let cosine_similarity = (dot / (norm1 * norm2)).clamp(-1.0, 1.0);
-                1.0 - cosine_similarity
+                Ok(1.0 - cosine_similarity)
             }
         }
     }
@@ -74,7 +77,7 @@ impl std::str::FromStr for Distance {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Distance::from_name(s)
-            .ok_or_else(|| format!("Unknown distance metric: {}", s))
+            .ok_or_else(|| format!("Unknown distance metric: {s}"))
     }
 }
 
@@ -83,46 +86,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_euclidean_distance() {
+    fn test_euclidean_distance_calculation() {
         let d = Distance::Euclidean;
         let v1 = Vector::from_slice(&[0.0, 0.0]);
         let v2 = Vector::from_slice(&[3.0, 4.0]);
-        assert_eq!(d.distance(&v1, &v2), 5.0);
+        assert_eq!(d.distance(&v1, &v2).unwrap(), 5.0);
     }
 
     #[test]
-    fn test_manhattan_distance() {
+    fn test_manhattan_distance_calculation() {
         let d = Distance::Manhattan;
         let v1 = Vector::from_slice(&[0.0, 0.0]);
         let v2 = Vector::from_slice(&[3.0, 4.0]);
-        assert_eq!(d.distance(&v1, &v2), 7.0);
+        assert_eq!(d.distance(&v1, &v2).unwrap(), 7.0);
     }
 
     #[test]
-    fn test_cosine_similarity() {
+    fn test_cosine_similarity_distance_calculation() {
         let d = Distance::CosineSim;
         let v1 = Vector::from_slice(&[1.0, 0.0]);
         let v2 = Vector::from_slice(&[1.0, 0.0]);
         // Same vectors should have distance 0 (similarity 1)
-        assert!((d.distance(&v1, &v2) - 0.0).abs() < 1e-6);
+        assert!((d.distance(&v1, &v2).unwrap() - 0.0).abs() < 1e-6);
 
         let v3 = Vector::from_slice(&[-1.0, 0.0]);
         // Opposite vectors should have distance 2 (similarity -1)
-        assert!((d.distance(&v1, &v3) - 2.0).abs() < 1e-6);
+        assert!((d.distance(&v1, &v3).unwrap() - 2.0).abs() < 1e-6);
 
         let v4 = Vector::from_slice(&[0.0, 1.0]);
         // Perpendicular vectors should have distance 1 (similarity 0)
-        assert!((d.distance(&v1, &v4) - 1.0).abs() < 1e-6);
+        assert!((d.distance(&v1, &v4).unwrap() - 1.0).abs() < 1e-6);
     }
 
-
-
     #[test]
-    #[should_panic(expected = "Vectors must have the same size")]
-    fn test_size_mismatch() {
+    fn test_distance_dimension_mismatch_errors() {
         let d = Distance::Euclidean;
         let v1 = Vector::from_slice(&[1.0, 2.0]);
         let v2 = Vector::from_slice(&[1.0, 2.0, 3.0]);
-        d.distance(&v1, &v2);
+        let result = d.distance(&v1, &v2);
+        assert!(result.is_err());
     }
 } 

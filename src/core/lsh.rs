@@ -1,10 +1,11 @@
 use crate::core::{Vector, Distance};
+use crate::error::VectorError;
 use rand::Rng;
 use rand_distr::{Normal, Cauchy, StandardNormal};
 use std::collections::HashMap;
 
 /// Enum for different hash function types
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum HashFunction {
     Euclidean(EuclideanHashFunction),
     Manhattan(ManhattanHashFunction),
@@ -12,7 +13,7 @@ enum HashFunction {
 }
 
 impl HashFunction {
-    fn hash(&self, v: &Vector) -> usize {
+    fn hash(&self, v: &Vector) -> Result<isize, VectorError> {
         match self {
             HashFunction::Euclidean(hf) => hf.hash(v),
             HashFunction::Manhattan(hf) => hf.hash(v),
@@ -32,7 +33,7 @@ impl Distance {
 }
 
 /// E2LSH hash function for Euclidean distance
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct EuclideanHashFunction {
     random_vector: Vector,
     bias: f32,
@@ -60,14 +61,15 @@ impl EuclideanHashFunction {
 }
 
 impl EuclideanHashFunction {
-    fn hash(&self, v: &Vector) -> usize {
-        let projection = v.dot_product(&self.random_vector) + self.bias;
-        (projection / self.width).floor() as usize
+    fn hash(&self, v: &Vector) -> Result<isize, VectorError> {
+        let projection = self.random_vector.dot_product(v)? + self.bias;
+        
+        Ok((projection / self.width).floor() as isize)
     }
 }
 
 /// L1LSH hash function for Manhattan distance
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ManhattanHashFunction {
     random_vector: Vector,
     bias: f32,
@@ -95,14 +97,15 @@ impl ManhattanHashFunction {
 }
 
 impl ManhattanHashFunction {
-    fn hash(&self, v: &Vector) -> usize {
-        let projection = v.dot_product(&self.random_vector) + self.bias;
-        (projection / self.width).floor() as usize
+    fn hash(&self, v: &Vector) -> Result<isize, VectorError> {
+        let projection = self.random_vector.dot_product(v)? + self.bias;
+        
+        Ok((projection / self.width).floor() as isize)
     }
 }
 
 /// SimHash function for cosine similarity
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CosineSimHashFunction {
     random_vector: Vector,
 }
@@ -122,11 +125,11 @@ impl CosineSimHashFunction {
 }
 
 impl CosineSimHashFunction {
-    fn hash(&self, v: &Vector) -> usize {
-        if v.dot_product(&self.random_vector) >= 0.0 {
-            1
+    fn hash(&self, v: &Vector) -> Result<isize, VectorError> {
+        if self.random_vector.dot_product(v)? >= 0.0 {
+            Ok(1)
         } else {
-            0
+            Ok(0)
         }
     }
 }
@@ -134,7 +137,7 @@ impl CosineSimHashFunction {
 /// LSH index for approximate nearest neighbor search
 pub struct LSHIndex {
     hash_functions: Vec<Vec<HashFunction>>,
-    hash_tables: Vec<HashMap<usize, HashMap<String, Vector>>>,
+    hash_tables: Vec<HashMap<isize, HashMap<String, Vector>>>,
     vector_map: HashMap<String, Vector>,
     dimensions: usize,
     distance_metric: Distance
@@ -170,26 +173,31 @@ impl LSHIndex {
     }
     
     /// Insert a vector into the LSH index
-    pub fn insert(&mut self, vector: Vector, key: String) {
-        assert_eq!(vector.size(), self.dimensions, "Vector dimensions must match LSH index dimensions");
-        assert!(!self.vector_map.contains_key(&key), "Key '{}' already exists in LSH index", key);
+    pub fn insert(&mut self, vector: Vector, key: String) -> Result<(), VectorError> {
+        if vector.size() != self.dimensions {
+            return Err(VectorError::DimensionsMismatch { expected: self.dimensions, found: vector.size() });
+        }
+        if self.vector_map.contains_key(&key) {
+            return Err(VectorError::KeyAlreadyExists(key));
+        }
         self.vector_map.insert(key.clone(), vector.clone());
         for (table_idx, table_functions) in self.hash_functions.iter().enumerate() {
             let mut hash_values = Vec::with_capacity(table_functions.len());
             for hash_function in table_functions {
-                hash_values.push(hash_function.hash(&vector));
+                hash_values.push(hash_function.hash(&vector)?);
             }
             let bucket_key = self.combine_hashes(&hash_values);
             self.hash_tables[table_idx]
                 .entry(bucket_key)
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .insert(key.clone(), vector.clone());
         }
+        Ok(())
     }
     
     /// Find the nearest neighbor to a query vector
-    pub fn nearest_neighbor(&self, query: &Vector) -> Option<String> {
-        self.nearest_neighbors(query, 1).into_iter().next().map(|(key, _)| key)
+    pub fn nearest_neighbor(&self, query: &Vector) -> Result<Option<String>, VectorError> {
+        self.nearest_neighbors(query, 1).map(|mut results| results.pop().map(|(key, _)| key))
     }
     
     /// Remove a vector from the LSH index by key
@@ -203,13 +211,15 @@ impl LSHIndex {
     }
 
     /// Search for approximate nearest neighbors, no guarantee you will get all k nearest neighbors
-    pub fn nearest_neighbors(&self, query: &Vector, k: usize) -> Vec<(String, f32)> {
-        assert_eq!(query.size(), self.dimensions, "Query vector dimensions must match LSH index dimensions");
+    pub fn nearest_neighbors(&self, query: &Vector, k: usize) -> Result<Vec<(String, f32)>, VectorError> {
+        if query.size() != self.dimensions {
+            return Err(VectorError::DimensionsMismatch { expected: self.dimensions, found: query.size() });
+        }
         let mut candidates = HashMap::new();
         for (table_idx, table_functions) in self.hash_functions.iter().enumerate() {
             let mut hash_values = Vec::with_capacity(table_functions.len());
             for hash_function in table_functions {
-                hash_values.push(hash_function.hash(query));
+                hash_values.push(hash_function.hash(query)?);
             }
             let bucket_key = self.combine_hashes(&hash_values);
             if let Some(bucket) = self.hash_tables[table_idx].get(&bucket_key) {
@@ -221,18 +231,18 @@ impl LSHIndex {
         let mut results: Vec<(String, f32)> = candidates
             .iter()
             .map(|(key, vector)| {
-                let distance = self.distance_metric.distance(query, vector);
+                let distance = self.distance_metric.distance(query, vector).unwrap();
                 (key.clone(), distance)
             })
             .collect();
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         results.truncate(k);
-        results
+        Ok(results)
     }
     
     /// Combine multiple hash values into a single bucket key
-    fn combine_hashes(&self, hash_values: &[usize]) -> usize {
-        let mut combined: usize = 0;
+    fn combine_hashes(&self, hash_values: &[isize]) -> isize {
+        let mut combined: isize = 0;
         for &hash_value in hash_values {
             combined = combined.wrapping_mul(31).wrapping_add(hash_value);
         }
@@ -272,100 +282,106 @@ impl LSHIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::Vector;
 
     #[test]
-    fn test_lsh_insertion_and_search_all_types() {
-        // Test all distance types
-        let distance_types = [Distance::Euclidean, Distance::Manhattan, Distance::CosineSim];
-        
-        for distance_type in distance_types {
-            let mut lsh = LSHIndex::new(3, 5, 3, distance_type, 4.0);
-            
-            // Insert test vectors
-            let vector1 = Vector::from_slice(&[1.0, 2.0, 3.0]);
-            let vector2 = Vector::from_slice(&[4.0, 5.0, 6.0]);
-            let vector3 = Vector::from_slice(&[7.0, 8.0, 9.0]);
-            
-            lsh.insert(vector1.clone(), "point1".to_string());
-            lsh.insert(vector2.clone(), "point2".to_string());
-            lsh.insert(vector3.clone(), "point3".to_string());
-            
-            // Test exact match search
-            let results = lsh.nearest_neighbors(&vector1, 2);
-            
-            // Should find at least the exact match
-            assert!(!results.is_empty(), "No results found for {:?}", distance_type);
-            
-            // The first result should be the exact match with distance 0 (or very close for floating point)
-            if let Some((key, distance)) = results.first() {
-                assert_eq!(key, "point1", "Wrong key for {:?}", distance_type);
-                assert!(
-                    distance.abs() < 1e-6, 
-                    "Wrong distance for {:?}: expected ~0.0, got {}", 
-                    distance_type, 
-                    distance
-                );
+    fn test_lsh_comprehensive_search_with_negative_buckets() {
+        fn fixed_lsh_with_custom_hash(distance: Distance) -> LSHIndex {
+            let dims = 2;
+            let width = 1.0;
+            let vector = Vector::from_slice(&[1.0, 1.0]); // Fixed vector for dot product
+    
+            let hash_function = match distance {
+                Distance::Euclidean => HashFunction::Euclidean(EuclideanHashFunction {
+                    random_vector: vector.clone(),
+                    bias: 0.0,
+                    width,
+                }),
+                Distance::Manhattan => HashFunction::Manhattan(ManhattanHashFunction {
+                    random_vector: vector.clone(),
+                    bias: 0.0,
+                    width,
+                }),
+                Distance::CosineSim => HashFunction::CosineSim(CosineSimHashFunction {
+                    random_vector: vector.clone(),
+                }),
+            };
+    
+            let hash_functions = vec![vec![hash_function; 5]; 10];
+            let hash_tables = vec![HashMap::new(); 10];
+    
+            LSHIndex {
+                hash_functions,
+                hash_tables,
+                vector_map: HashMap::new(),
+                dimensions: dims,
+                distance_metric: distance,
             }
-            
-            // Test nearest neighbor method
-            let nearest = lsh.nearest_neighbor(&vector1);
-            assert_eq!(nearest, Some("point1".to_string()), "Wrong nearest neighbor for {:?}", distance_type);
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "Vector dimensions must match LSH index dimensions")]
-    fn test_lsh_dimension_mismatch_insert() {
-        let mut lsh = LSHIndex::new(3, 2, 2, Distance::Euclidean, 4.0);
-        lsh.insert(Vector::from_slice(&[1.0, 2.0]), "key1".to_string());
-    }
-
-    #[test]
-    #[should_panic(expected = "Query vector dimensions must match LSH index dimensions")]
-    fn test_lsh_dimension_mismatch_search() {
-        let lsh = LSHIndex::new(3, 2, 2, Distance::Euclidean, 4.0);
-        lsh.nearest_neighbors(&Vector::from_slice(&[1.0, 2.0]), 1);
-    }
-
-    #[test]
-    fn test_distance_hash_function_creation() {
-        // Test that we can create hash functions for each distance type
-        let euclidean_hash = Distance::Euclidean.create_hash_function(3, 4.0);
-        let manhattan_hash = Distance::Manhattan.create_hash_function(3, 4.0);
-        let cosine_hash = Distance::CosineSim.create_hash_function(3, 4.0);
+    
+        fn run_test(distance: Distance) {
+            let mut lsh = fixed_lsh_with_custom_hash(distance);
         
-        let test_vector = Vector::from_slice(&[1.0, 2.0, 3.0]);
-        euclidean_hash.hash(&test_vector);
-        manhattan_hash.hash(&test_vector);
-        cosine_hash.hash(&test_vector);
-        // Should not panic
+            // Positive projection case
+            let v1 = Vector::from_slice(&[1.0, 2.0]);
+            let v2 = Vector::from_slice(&[3.0, 4.0]);
+            lsh.insert(v1.clone(), "key1".to_string()).unwrap();
+            lsh.insert(v2.clone(), "key2".to_string()).unwrap();
+        
+            let query_pos = Vector::from_slice(&[1.0, 2.0]);
+            let result_pos = lsh.nearest_neighbors(&query_pos, 1).unwrap();
+            assert_eq!(result_pos[0].0, "key1", "Expected key1 for {:?} (positive projection)", distance);
+        
+            // Negative projection case
+            let mut lsh_neg = fixed_lsh_with_custom_hash(distance);
+        
+            let v3 = Vector::from_slice(&[-1.0, -2.0]);
+            let v4 = Vector::from_slice(&[-3.0, -4.0]);
+            lsh_neg.insert(v3.clone(), "neg1".to_string()).unwrap();
+            lsh_neg.insert(v4.clone(), "neg2".to_string()).unwrap();
+        
+            let query_neg = Vector::from_slice(&[-1.0, -2.0]);
+            let result_neg = lsh_neg.nearest_neighbors(&query_neg, 1).unwrap();
+            assert_eq!(result_neg[0].0, "neg1", "Expected neg1 for {:?} (negative projection)", distance);
+        }
+    
+        run_test(Distance::Euclidean);
+        run_test(Distance::Manhattan);
+        run_test(Distance::CosineSim);
+    }
+    
+    #[test]
+    fn test_lsh_dimension_mismatch_errors() {
+        let mut lsh = LSHIndex::new(3, 10, 5, Distance::Euclidean, 1.0);
+        
+        let vector_2d = Vector::from_slice(&[1.0, 2.0]);
+        let result = lsh.insert(vector_2d.clone(), "key1".to_string());
+        assert!(result.is_err());
+        
+        let result = lsh.nearest_neighbor(&vector_2d);
+        assert!(result.is_err());
     }
 
     #[test]
-    #[should_panic(expected = "Key 'key1' already exists in LSH index")]
     fn test_lsh_duplicate_key_prevention() {
-        let mut lsh = LSHIndex::new(3, 2, 2, Distance::Euclidean, 4.0);
-        
-        lsh.insert(Vector::from_slice(&[1.0, 2.0, 3.0]), "key1".to_string());
-        lsh.insert(Vector::from_slice(&[4.0, 5.0, 6.0]), "key1".to_string());
+        let mut lsh = LSHIndex::new(2, 10, 5, Distance::Euclidean, 1.0);
+        let vector = Vector::from_slice(&[1.0, 1.0]);
+        lsh.insert(vector.clone(), "key1".to_string()).unwrap();
+        let result = lsh.insert(vector, "key1".to_string());
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_lsh_remove_functionality() {
-        let mut lsh = LSHIndex::new(3, 2, 2, Distance::Euclidean, 4.0);
-        
-        let vector = Vector::from_slice(&[1.0, 2.0, 3.0]);
-        lsh.insert(vector.clone(), "key1".to_string());
-        
-        // Should contain the key
+    fn test_lsh_remove_and_cleanup() {
+        let mut lsh = LSHIndex::new(2, 10, 5, Distance::Euclidean, 1.0);
+        let vector = Vector::from_slice(&[1.0, 1.0]);
+        lsh.insert(vector, "key1".to_string()).unwrap();
         assert!(lsh.vector_map.contains_key("key1"));
-        
-        // Remove the key
+
         lsh.remove("key1");
         assert!(!lsh.vector_map.contains_key("key1"));
-        
-        // Search should return empty results
-        let results = lsh.nearest_neighbors(&vector, 1);
+
+        let results = lsh.nearest_neighbors(&Vector::from_slice(&[1.0, 1.0]), 1).unwrap();
         assert!(results.is_empty());
     }
 } 

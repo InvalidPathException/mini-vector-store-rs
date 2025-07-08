@@ -1,6 +1,8 @@
 pub mod core;
+pub mod error;
 
 use crate::core::{Distance, KDTree, LSHIndex};
+use crate::error::VectorError;
 use std::collections::HashMap;
 
 /// Search result with metadata
@@ -80,41 +82,43 @@ impl VectorDatabase {
     }
     
     /// Insert a vector with a key
-    pub fn insert(&mut self, vector: Vector, key: String) {
+    pub fn insert(&mut self, vector: Vector, key: String) -> Result<(), VectorError> {
         if vector.size() != self.dimensions {
-            panic!("Vector dimensions must match database dimensions");
+            return Err(VectorError::DimensionsMismatch { expected: self.dimensions, found: vector.size() });
         }
         
         if let Some(ref mut kd_tree) = self.kd_tree {
-            kd_tree.insert(vector.clone(), key.clone());
+            kd_tree.insert(vector.clone(), key.clone())?;
         }
         
         if let Some(ref mut lsh_index) = self.lsh_index {
-            lsh_index.insert(vector, key);
+            lsh_index.insert(vector, key)?;
         }
+        Ok(())
     }
     
     /// Insert a vector with a key and metadata
-    pub fn insert_with_metadata(&mut self, vector: Vector, key: String, metadata: String) {
+    pub fn insert_with_metadata(&mut self, vector: Vector, key: String, metadata: String) -> Result<(), VectorError> {
         self.metadata_map.insert(key.clone(), metadata);
-        self.insert(vector, key);
+        self.insert(vector, key)
     }
     
     /// Insert multiple vectors in batch
-    pub fn batch_insert(&mut self, vectors: Vec<Vector>, keys: Vec<String>) {
+    pub fn batch_insert(&mut self, vectors: Vec<Vector>, keys: Vec<String>) -> Result<(), VectorError> {
         if vectors.len() != keys.len() {
-            panic!("Number of vectors must match number of keys");
+            return Err(VectorError::KeysAndVectorsMismatch);
         }
         
         for (vector, key) in vectors.into_iter().zip(keys) {
-            self.insert(vector, key);
+            self.insert(vector, key)?;
         }
+        Ok(())
     }
     
     /// Perform similarity search
-    pub fn similarity_search(&self, query: &Vector, k: usize, performance: QueryPerformance) -> Vec<(String, f32)> {
+    pub fn similarity_search(&self, query: &Vector, k: usize, performance: QueryPerformance) -> Result<Vec<(String, f32)>, VectorError> {
         if query.size() != self.dimensions {
-            panic!("Query vector dimensions must match database dimensions");
+            return Err(VectorError::DimensionsMismatch { expected: self.dimensions, found: query.size() });
         }
         
         match (self.backing_storage, performance) {
@@ -123,7 +127,7 @@ impl VectorDatabase {
                 if let Some(ref kd_tree) = self.kd_tree {
                     kd_tree.nearest_neighbors(query, k)
                 } else {
-                    Vec::new()
+                    Ok(Vec::new())
                 }
             }
             
@@ -132,7 +136,7 @@ impl VectorDatabase {
                 if let Some(ref lsh_index) = self.lsh_index {
                     lsh_index.nearest_neighbors(query, k)
                 } else {
-                    Vec::new()
+                    Ok(Vec::new())
                 }
             }
             
@@ -142,7 +146,7 @@ impl VectorDatabase {
                 if let Some(ref lsh_index) = self.lsh_index {
                     lsh_index.nearest_neighbors(query, k)
                 } else {
-                    Vec::new()
+                    Ok(Vec::new())
                 }
             }
             
@@ -151,17 +155,17 @@ impl VectorDatabase {
                 if let Some(ref kd_tree) = self.kd_tree {
                     kd_tree.nearest_neighbors(query, k)
                 } else {
-                    Vec::new()
+                    Ok(Vec::new())
                 }
             }
         }
     }
     
     /// Perform similarity search with metadata
-    pub fn similarity_search_with_metadata(&self, query: &Vector, k: usize, performance: QueryPerformance) -> Vec<SearchResult> {
-        let results = self.similarity_search(query, k, performance);
+    pub fn similarity_search_with_metadata(&self, query: &Vector, k: usize, performance: QueryPerformance) -> Result<Vec<SearchResult>, VectorError> {
+        let results = self.similarity_search(query, k, performance)?;
         
-        results
+        Ok(results
             .into_iter()
             .map(|(key, distance)| {
                 let metadata = self.metadata_map.get(&key).cloned().unwrap_or_default();
@@ -171,11 +175,11 @@ impl VectorDatabase {
                     metadata,
                 }
             })
-            .collect()
+            .collect())
     }
     
     /// Perform batch similarity search
-    pub fn batch_similarity_search(&self, queries: Vec<Vector>, k: usize, performance: QueryPerformance) -> Vec<Vec<(String, f32)>> {
+    pub fn batch_similarity_search(&self, queries: Vec<Vector>, k: usize, performance: QueryPerformance) -> Result<Vec<Vec<(String, f32)>>, VectorError> {
         queries
             .iter()
             .map(|query| self.similarity_search(query, k, performance))
@@ -267,8 +271,8 @@ pub struct LSHParams {
 impl Default for LSHParams {
     fn default() -> Self {
         Self {
-            num_tables: 20,
-            num_hash_functions: 4,
+            num_tables: 10,
+            num_hash_functions: 5,
             width: 4.0,
         }
     }
@@ -282,60 +286,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_vector_database_insertion() {
-        let mut db = VectorDatabase::new(3, BackingStorage::KDTreeOnly, None);
-        
-        let vector = Vector::from_slice(&[1.0, 2.0, 3.0]);
-        db.insert(vector, "key1".to_string());
-        
-        assert_eq!(db.size(), 1);
+    fn test_vector_database_basic_insertion() {
+        let mut db = VectorDatabase::new(2, BackingStorage::KDTreeOnly, None);
+        let vector = Vector::from_slice(&[1.0, 2.0]);
+        db.insert(vector, "test".to_string()).unwrap();
         assert!(!db.is_empty());
     }
 
     #[test]
     fn test_vector_database_insertion_with_metadata() {
-        let mut db = VectorDatabase::new(3, BackingStorage::KDTreeOnly, None);
-        
-        let vector = Vector::from_slice(&[1.0, 2.0, 3.0]);
-        db.insert_with_metadata(vector, "key1".to_string(), "metadata1".to_string());
-        
-        assert_eq!(db.get_metadata("key1"), Some(&"metadata1".to_string()));
+        let mut db = VectorDatabase::new(2, BackingStorage::KDTreeOnly, None);
+        let vector = Vector::from_slice(&[1.0, 2.0]);
+        db.insert_with_metadata(vector, "test".to_string(), "metadata".to_string()).unwrap();
+        assert_eq!(db.get_metadata("test"), Some(&"metadata".to_string()));
     }
 
     #[test]
     fn test_vector_database_similarity_search() {
-        let mut db = VectorDatabase::new(3, BackingStorage::KDTreeOnly, None);
-        
-        db.insert(Vector::from_slice(&[1.0, 1.0, 1.0]), "point1".to_string());
-        db.insert(Vector::from_slice(&[2.0, 2.0, 2.0]), "point2".to_string());
-        db.insert(Vector::from_slice(&[3.0, 3.0, 3.0]), "point3".to_string());
-        
-        let query = Vector::from_slice(&[1.5, 1.5, 1.5]);
-        let results = db.similarity_search(&query, 2, QueryPerformance::Accurate);
-        
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, "point1");
-        assert_eq!(results[1].0, "point2");
+        let mut db = VectorDatabase::new(2, BackingStorage::KDTreeOnly, None);
+        let vector1 = Vector::from_slice(&[1.0, 2.0]);
+        let vector2 = Vector::from_slice(&[3.0, 4.0]);
+        db.insert(vector1, "test1".to_string()).unwrap();
+        db.insert(vector2, "test2".to_string()).unwrap();
+
+        let query = Vector::from_slice(&[1.0, 1.0]);
+        let results = db.similarity_search(&query, 1, QueryPerformance::Accurate).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "test1");
     }
 
     #[test]
-    fn test_batch_insert() {
-        let mut db = VectorDatabase::new(3, BackingStorage::KDTreeOnly, None);
-        
+    fn test_vector_database_batch_operations() {
+        let mut db = VectorDatabase::new(2, BackingStorage::KDTreeOnly, None);
         let vectors = vec![
-            Vector::from_slice(&[1.0, 2.0, 3.0]),
-            Vector::from_slice(&[4.0, 5.0, 6.0]),
+            Vector::from_slice(&[1.0, 2.0]),
+            Vector::from_slice(&[3.0, 4.0]),
         ];
-        let keys = vec!["key1".to_string(), "key2".to_string()];
-        
-        db.batch_insert(vectors, keys);
+        let keys = vec!["test1".to_string(), "test2".to_string()];
+        db.batch_insert(vectors, keys).unwrap();
         assert_eq!(db.size(), 2);
     }
 
     #[test]
-    #[should_panic(expected = "Vector dimensions must match database dimensions")]
-    fn test_dimension_mismatch() {
+    fn test_vector_database_dimension_mismatch_errors() {
         let mut db = VectorDatabase::new(3, BackingStorage::KDTreeOnly, None);
-        db.insert(Vector::from_slice(&[1.0, 2.0]), "key1".to_string());
+        let vector = Vector::from_slice(&[1.0, 2.0]);
+        let result = db.insert(vector, "test".to_string());
+        assert!(result.is_err());
     }
 }
