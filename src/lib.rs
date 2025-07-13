@@ -1,9 +1,11 @@
 pub mod core;
 pub mod error;
+pub mod feature;
 
 use crate::core::{Distance, KDTree, LSHIndex};
 use crate::error::VectorError;
 use std::collections::HashMap;
+use std::cell::RefCell;
 
 /// Search result with metadata
 #[derive(Debug, Clone)]
@@ -33,21 +35,41 @@ pub enum QueryPerformance {
     Accurate,
 }
 
-/// Main vector database implementation
 pub struct VectorDatabase {
     kd_tree: Option<KDTree>,
     lsh_index: Option<LSHIndex>,
     backing_storage: BackingStorage,
     dimensions: usize,
     metadata_map: HashMap<String, String>,
+    cache: Option<RefCell<crate::feature::QueryCache>>,
 }
 
 impl VectorDatabase {
     /// Create a new vector database
+    /// 
+    /// # Arguments
+    /// 
+    /// * `dimensions` - The number of dimensions for vectors
+    /// * `backing_storage` - The storage backend to use (KDTree, LSH, or Hybrid)
+    /// * `lsh_params` - Optional LSH parameters (only used for LSH and Hybrid storage)
+    /// * `enable_cache` - Whether to enable query result caching
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use mini_vector_store_rs::{VectorDatabase, BackingStorage};
+    /// 
+    /// // Create without caching
+    /// let db = VectorDatabase::new(128, BackingStorage::KDTreeOnly, None, false);
+    /// 
+    /// // Create with caching enabled
+    /// let db_cached = VectorDatabase::new(128, BackingStorage::KDTreeOnly, None, true);
+    /// ```
     pub fn new(
         dimensions: usize,
         backing_storage: BackingStorage,
         lsh_params: Option<LSHParams>,
+        enable_cache: bool,
     ) -> Self {
         let distance_metric = Distance::Euclidean;
         
@@ -72,12 +94,19 @@ impl VectorDatabase {
             BackingStorage::KDTreeOnly => None,
         };
         
+        let cache = if enable_cache {
+            Some(RefCell::new(crate::feature::QueryCache::new()))
+        } else {
+            None
+        };
+        
         Self {
             kd_tree,
             lsh_index,
             backing_storage,
             dimensions,
             metadata_map: HashMap::new(),
+            cache,
         }
     }
     
@@ -94,6 +123,12 @@ impl VectorDatabase {
         if let Some(ref mut lsh_index) = self.lsh_index {
             lsh_index.insert(vector, key)?;
         }
+        
+        // Invalidate cause result/error instead of panicche when data is modified
+        if let Some(ref cache) = self.cache {
+            cache.borrow_mut().invalidate_all();
+        }
+        
         Ok(())
     }
     
@@ -121,22 +156,29 @@ impl VectorDatabase {
             return Err(VectorError::DimensionsMismatch { expected: self.dimensions, found: query.size() });
         }
         
-        match (self.backing_storage, performance) {
+        // Check cache first if enabled
+        if let Some(ref cache) = self.cache {
+            if let Some(cached_results) = cache.borrow().get(query, k, performance) {
+                return Ok(cached_results);
+            }
+        }
+        
+        let (results, actual_performance) = match (self.backing_storage, performance) {
             // KD-tree only scenarios
             (BackingStorage::KDTreeOnly, _) => {
                 if let Some(ref kd_tree) = self.kd_tree {
-                    kd_tree.nearest_neighbors(query, k)
+                    (kd_tree.nearest_neighbors(query, k)?, QueryPerformance::Accurate)
                 } else {
-                    Ok(Vec::new())
+                    (Vec::new(), QueryPerformance::Accurate)
                 }
             }
             
             // LSH only scenarios
             (BackingStorage::LSHOnly, _) => {
                 if let Some(ref lsh_index) = self.lsh_index {
-                    lsh_index.nearest_neighbors(query, k)
+                    (lsh_index.nearest_neighbors(query, k)?, QueryPerformance::Fast)
                 } else {
-                    Ok(Vec::new())
+                    (Vec::new(), QueryPerformance::Fast)
                 }
             }
             
@@ -144,21 +186,28 @@ impl VectorDatabase {
             (BackingStorage::Hybrid, QueryPerformance::Fast) => {
                 // Use LSH for speed
                 if let Some(ref lsh_index) = self.lsh_index {
-                    lsh_index.nearest_neighbors(query, k)
+                    (lsh_index.nearest_neighbors(query, k)?, QueryPerformance::Fast)
                 } else {
-                    Ok(Vec::new())
+                    (Vec::new(), QueryPerformance::Fast)
                 }
             }
             
             (BackingStorage::Hybrid, QueryPerformance::Accurate) => {
                 // Use KD-tree for accuracy
                 if let Some(ref kd_tree) = self.kd_tree {
-                    kd_tree.nearest_neighbors(query, k)
+                    (kd_tree.nearest_neighbors(query, k)?, QueryPerformance::Accurate)
                 } else {
-                    Ok(Vec::new())
+                    (Vec::new(), QueryPerformance::Accurate)
                 }
             }
+        };
+        
+        // Store results in cache if enabled
+        if let Some(ref cache) = self.cache {
+            cache.borrow_mut().put(query, k, actual_performance, results.clone());
         }
+        
+        Ok(results)
     }
     
     /// Perform similarity search with metadata
@@ -257,6 +306,34 @@ impl VectorDatabase {
         }
         
         self.metadata_map.remove(key);
+        
+        // Invalidate cache when data is modified
+        if let Some(ref cache) = self.cache {
+            cache.borrow_mut().invalidate_all();
+        }
+    }
+    
+    /// Check if caching is enabled
+    pub fn is_cache_enabled(&self) -> bool {
+        self.cache.is_some()
+    }
+    
+    /// Get cache statistics (returns None if caching is disabled)
+    pub fn cache_stats(&self) -> Option<(usize, usize, usize)> {
+        self.cache.as_ref().map(|cache| {
+            let cache_ref = cache.borrow();
+            (cache_ref.len(), cache_ref.fast_cache_len(), cache_ref.accurate_cache_len())
+        })
+    }
+    
+    /// Manually clear the cache (returns false if caching is disabled)
+    pub fn clear_cache(&mut self) -> bool {
+        if let Some(ref cache) = self.cache {
+            cache.borrow_mut().invalidate_all();
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -280,6 +357,7 @@ impl Default for LSHParams {
 
 // Re-export core types for public use
 pub use crate::core::Vector;
+pub use crate::feature::QueryCache;
 
 #[cfg(test)]
 mod tests {
@@ -287,7 +365,7 @@ mod tests {
 
     #[test]
     fn test_vector_database_basic_insertion() {
-        let mut db = VectorDatabase::new(2, BackingStorage::KDTreeOnly, None);
+        let mut db = VectorDatabase::new(2, BackingStorage::KDTreeOnly, None, false);
         let vector = Vector::from_slice(&[1.0, 2.0]);
         db.insert(vector, "test".to_string()).unwrap();
         assert!(!db.is_empty());
@@ -295,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_vector_database_insertion_with_metadata() {
-        let mut db = VectorDatabase::new(2, BackingStorage::KDTreeOnly, None);
+        let mut db = VectorDatabase::new(2, BackingStorage::KDTreeOnly, None, false);
         let vector = Vector::from_slice(&[1.0, 2.0]);
         db.insert_with_metadata(vector, "test".to_string(), "metadata".to_string()).unwrap();
         assert_eq!(db.get_metadata("test"), Some(&"metadata".to_string()));
@@ -303,7 +381,7 @@ mod tests {
 
     #[test]
     fn test_vector_database_similarity_search() {
-        let mut db = VectorDatabase::new(2, BackingStorage::KDTreeOnly, None);
+        let mut db = VectorDatabase::new(2, BackingStorage::KDTreeOnly, None, false);
         let vector1 = Vector::from_slice(&[1.0, 2.0]);
         let vector2 = Vector::from_slice(&[3.0, 4.0]);
         db.insert(vector1, "test1".to_string()).unwrap();
@@ -317,7 +395,7 @@ mod tests {
 
     #[test]
     fn test_vector_database_batch_operations() {
-        let mut db = VectorDatabase::new(2, BackingStorage::KDTreeOnly, None);
+        let mut db = VectorDatabase::new(2, BackingStorage::KDTreeOnly, None, false);
         let vectors = vec![
             Vector::from_slice(&[1.0, 2.0]),
             Vector::from_slice(&[3.0, 4.0]),
@@ -329,9 +407,73 @@ mod tests {
 
     #[test]
     fn test_vector_database_dimension_mismatch_errors() {
-        let mut db = VectorDatabase::new(3, BackingStorage::KDTreeOnly, None);
+        let mut db = VectorDatabase::new(3, BackingStorage::KDTreeOnly, None, false);
         let vector = Vector::from_slice(&[1.0, 2.0]);
         let result = db.insert(vector, "test".to_string());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_vector_database_with_caching() {
+        let mut db = VectorDatabase::new(2, BackingStorage::KDTreeOnly, None, true);
+        assert!(db.is_cache_enabled());
+        
+        // Insert vectors
+        let vector1 = Vector::from_slice(&[1.0, 2.0]);
+        let vector2 = Vector::from_slice(&[3.0, 4.0]);
+        db.insert(vector1, "test1".to_string()).unwrap();
+        db.insert(vector2, "test2".to_string()).unwrap();
+
+        // First search should miss cache
+        let query1 = Vector::from_slice(&[1.0, 1.0]);
+        let results1 = db.similarity_search(&query1, 1, QueryPerformance::Accurate).unwrap();
+        assert_eq!(results1.len(), 1);
+        
+        // Check cache stats
+        let stats = db.cache_stats().unwrap();
+        assert_eq!(stats.0, 1); // total entries
+        assert_eq!(stats.2, 1); // accurate entries
+        
+        // Insert should invalidate cache
+        let vector3 = Vector::from_slice(&[5.0, 6.0]);
+        db.insert(vector3, "test3".to_string()).unwrap();
+        let stats = db.cache_stats().unwrap();
+        assert_eq!(stats.0, 0); // total entries
+
+        let query2 = Vector::from_slice(&[1.0, 2.0]);
+        let results2 = db.similarity_search(&query2, 1, QueryPerformance::Accurate).unwrap();
+        assert_eq!(results2.len(), 1);
+        
+        // Clear cache manually
+        assert!(db.clear_cache());
+        let stats = db.cache_stats().unwrap();
+        assert_eq!(stats.0, 0);
+    }
+
+    #[test]
+    fn test_vector_database_cache_performance_preference() {
+        let mut db = VectorDatabase::new(2, BackingStorage::Hybrid, None, true);
+        
+        let vector1 = Vector::from_slice(&[1.0, 2.0]);
+        db.insert(vector1, "test1".to_string()).unwrap();
+        
+        let query = Vector::from_slice(&[1.0, 1.0]);
+        
+        // First search with Fast performance (will use LSH)
+        let _results_fast = db.similarity_search(&query, 1, QueryPerformance::Fast).unwrap();
+        
+        // Second search with Accurate performance (will use KD-tree)
+        let _results_accurate = db.similarity_search(&query, 1, QueryPerformance::Accurate).unwrap();
+        
+        // Both searches should be cached
+        let stats = db.cache_stats().unwrap();
+        assert_eq!(stats.0, 2); // total entries (fast + accurate)
+        
+        // If we request Fast again, should return Accurate if available
+        let _results_fast2 = db.similarity_search(&query, 1, QueryPerformance::Fast).unwrap();
+        
+        // Cache should still have the same entries
+        let stats = db.cache_stats().unwrap();
+        assert_eq!(stats.0, 2); // should still be 2
     }
 }
